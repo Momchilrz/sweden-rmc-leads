@@ -5,8 +5,6 @@ Reading and refreshing this app does not connect to Dynamics 365 or Dataverse.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
@@ -15,13 +13,11 @@ from main import run_etl_pipeline
 from schedule import next_slot, scheduled_run_is_due
 from transformer import PHASE_LABELS
 
-LOGO_PATH = Path(__file__).resolve().parent / "assets" / "heidelberg-materials-logo.png"
-BRAND = "#004E2B"
-LEAF = "#00B932"
+BRAND = "#1F3A5F"
 
 st.set_page_config(
-    page_title="Sweden RMC Lead Staging",
-    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "🏗️",
+    page_title="MR Project",
+    page_icon=":material/apartment:",
     layout="wide",
 )
 
@@ -83,7 +79,7 @@ def _inject_brand_css() -> None:
           [data-testid="stMarkdownContainer"] {{
             overflow: visible;
           }}
-          .hm-stamp {{
+          .mr-stamp {{
             border: 3px solid {BRAND};
             color: {BRAND};
             font-weight: 800;
@@ -95,16 +91,16 @@ def _inject_brand_css() -> None:
             margin-top: 8px;
             display: block;
           }}
-          .hm-real {{
+          .mr-real {{
             color: #1A241C;
             font-size: 0.92rem;
             line-height: 1.35;
             margin: 0.55rem 0 0;
           }}
-          .hm-rule {{
-            height: 6px;
-            background: linear-gradient(90deg, {BRAND} 0 72%, {LEAF} 72% 100%);
-            margin: 0.15rem 0 0.9rem;
+          .mr-rule {{
+            height: 4px;
+            background: {BRAND};
+            margin: 0.35rem 0 0.9rem;
           }}
         </style>
         """,
@@ -113,19 +109,18 @@ def _inject_brand_css() -> None:
 
 
 def _render_header() -> None:
-    logo_col, stamp_col = st.columns([4.2, 1.6])
-    with logo_col:
-        if LOGO_PATH.exists():
-            st.image(str(LOGO_PATH), width=340)
+    name_col, stamp_col = st.columns([4.2, 1.6])
+    with name_col:
+        st.header("MR Project")
     with stamp_col:
         st.markdown(
             """
-            <div class="hm-stamp">TEST</div>
-            <p class="hm-real">Test environment. The project records are real public notices, not sample data.</p>
+            <div class="mr-stamp">TEST</div>
+            <p class="mr-real">Test environment. The project records are real public notices, not sample data.</p>
             """,
             unsafe_allow_html=True,
         )
-    st.markdown('<div class="hm-rule"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="mr-rule"></div>', unsafe_allow_html=True)
     st.title("Sweden RMC lead staging")
     upcoming = next_slot().strftime("%d %b %Y, 06:00")
     st.caption(
