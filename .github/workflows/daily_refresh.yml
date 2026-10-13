@@ -1,0 +1,40 @@
+name: Daily Swedish morning refresh
+
+on:
+  schedule:
+    # 04:00 UTC is 06:00 Swedish summer time. 05:00 UTC is 06:00 Swedish winter time.
+    # The Python slot check runs the pull once, at 06:00 Europe/Stockholm.
+    - cron: "0 4 * * *"
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull public notices when the Swedish morning slot is due
+        env:
+          TRAFIKVERKET_API_KEY: ${{ secrets.TRAFIKVERKET_API_KEY }}
+        run: python main.py --scheduled
+
+      - name: Publish the staging snapshot
+        run: |
+          git add rmc_leads_staging.db
+          if git diff --cached --quiet; then
+            echo "No database change."
+          else
+            git -c user.name="sweden-rmc-leads" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Refresh the Swedish morning lead snapshot"
+            git push
+          fi

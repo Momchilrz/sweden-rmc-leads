@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 
-from database import upsert_leads
+from database import record_etl_run, upsert_leads
 from fetchers import FetchError, fetch_opentender, fetch_ted, fetch_trafikverket
+from schedule import scheduled_run_is_due
 from transformer import transform_opentender, transform_ted, transform_trafikverket
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -48,10 +50,21 @@ def run_etl_pipeline() -> dict:
             summary["fetched"][source_name] = 0
             summary["upserted"][source_name] = 0
             logger.exception(message)
+    record_etl_run(summary)
     return summary
 
 
-if __name__ == "__main__":
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Refresh the local Sweden RMC staging database.")
+    parser.add_argument(
+        "--scheduled",
+        action="store_true",
+        help="Pull only when the 06:00 Europe/Stockholm slot is still open.",
+    )
+    args = parser.parse_args()
+    if args.scheduled and not scheduled_run_is_due():
+        print("Swedish morning slot is already covered.")
+        return 0
     result = run_etl_pipeline()
     print("Staging complete")
     for source, count in result["upserted"].items():
@@ -61,3 +74,8 @@ if __name__ == "__main__":
         print("Source errors:")
         for error in result["errors"]:
             print(f"  - {error}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

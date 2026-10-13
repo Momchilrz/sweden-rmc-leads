@@ -54,6 +54,77 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
 
 
+class EtlRun(Base):
+    """One completed refresh. Used to keep the daily Swedish morning pull to a single run."""
+
+    __tablename__ = "etl_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    Finished_On = Column(DateTime, default=datetime.utcnow, nullable=False)
+    Status = Column(String(20), nullable=False)
+    Summary = Column(Text, nullable=True)
+
+
+def last_successful_run(session=None):
+    """Naive UTC timestamp of the latest successful refresh, or None."""
+    init_db()
+    own_session = session is None
+    session = session or SessionLocal()
+    try:
+        run = (
+            session.query(EtlRun)
+            .filter(EtlRun.Status == "ok")
+            .order_by(EtlRun.Finished_On.desc())
+            .first()
+        )
+        return None if run is None else run.Finished_On
+    finally:
+        if own_session:
+            session.close()
+
+
+def newest_lead_created_on():
+    """Fallback clock for a snapshot that predates the run log."""
+    init_db()
+    session = SessionLocal()
+    try:
+        return session.query(Lead.Created_On).order_by(Lead.Created_On.desc()).limit(1).scalar()
+    finally:
+        session.close()
+
+
+def lead_count() -> int:
+    init_db()
+    session = SessionLocal()
+    try:
+        return session.query(Lead).count()
+    finally:
+        session.close()
+
+
+def record_etl_run(summary: dict) -> None:
+    """Remember a refresh that stored leads. A total failure stays unlogged so the next open can retry."""
+    if summary.get("total_upserted", 0) <= 0 and summary.get("errors"):
+        return
+    init_db()
+    brief = ", ".join(f"{name} {count}" for name, count in summary.get("upserted", {}).items())
+    session = SessionLocal()
+    try:
+        session.add(
+            EtlRun(
+                Finished_On=datetime.utcnow(),
+                Status="ok",
+                Summary=brief[:500],
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def upsert_leads(rows: list[dict]) -> int:
     """Insert new leads and update existing ones matched on external code.
 
