@@ -136,7 +136,7 @@ def _render_table(frame: pd.DataFrame) -> None:
     shown = display[columns]
     event = st.dataframe(
         shown,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",

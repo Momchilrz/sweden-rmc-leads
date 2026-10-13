@@ -584,7 +584,9 @@ def _ted_value(notice: dict) -> tuple[float | None, str]:
 
 def _ted_title(notice: dict) -> str:
     text = sanitize_text(_localized(notice.get("notice-title")), 500)
-    parts = [part.strip() for part in re.split(r"\s+[–—-]\s+", text) if part.strip()]
+    # TED separates country, CPV label, and the project name with en dashes.
+    # ASCII hyphens stay intact so "åk 4 - 9" is not treated as a separator.
+    parts = [part.strip() for part in re.split(r"\s+[–—]\s+", text) if part.strip()]
     if len(parts) >= 2:
         text = parts[-1]
     return sanitize_text(text, 162)
