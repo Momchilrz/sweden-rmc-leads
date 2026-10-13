@@ -1,0 +1,8 @@
+.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+
+# The staging snapshot is part of the project so Streamlit Cloud can preview
+# leads immediately. Do not ignore this file.
+!rmc_leads_staging.db
