@@ -409,19 +409,14 @@ def transform_opentender(payload) -> list[dict]:
         )
         raw_id = (
             record.get("id")
+            or record.get("persistentId")
             or record.get("tenderId")
             or record.get("noticeId")
             or record.get("ocid")
         )
-        status = (
-            record.get("status")
-            or record.get("procedureStatus")
-            or record.get("phase")
-            or record.get("Sector")
-        )
-        address = record.get("address") if isinstance(record.get("address"), dict) else {}
-        buyer = record.get("buyer") if isinstance(record.get("buyer"), dict) else {}
+        buyer = _first_opentender_buyer(record)
         buyer_address = buyer.get("address") if isinstance(buyer.get("address"), dict) else {}
+        address = record.get("address") if isinstance(record.get("address"), dict) else {}
         city = (
             record.get("city")
             or address.get("city")
@@ -435,21 +430,30 @@ def transform_opentender(payload) -> list[dict]:
             or address.get("postalCode")
             or buyer_address.get("postcode")
         )
-        region = (
+        region = _first_text(
             record.get("region")
             or record.get("nuts")
             or address.get("nuts")
             or buyer_address.get("nuts")
+            or buyer_address.get("nutsRobust2021")
         )
-        buyer_name = _localized(record.get("buyerName") or buyer.get("name") or record.get("buyers"))
+        buyer_name = sanitize_text(buyer.get("name") or record.get("buyerName"), 120)
+        cpv_names = []
+        for cpv in _as_list(record.get("cpvs"))[:4]:
+            if isinstance(cpv, dict) and cpv.get("code"):
+                cpv_names.append(sanitize_text(cpv.get("code"), 12))
+            elif cpv:
+                cpv_names.append(sanitize_text(cpv, 12))
+        published = sanitize_text(record.get("tender_publication_date"), 20)
         notes = " | ".join(
             part
             for part in (
                 f"Buyer: {buyer_name}" if buyer_name else "",
-                f"Sector: {sanitize_text(record.get('sector') or record.get('Sector'), 80)}",
+                f"CPV: {', '.join(cpv_names)}" if cpv_names else "",
+                f"Published: {published}" if published else "",
                 sanitize_text(record.get("description") or record.get("summary"), 600),
             )
-            if part and part != "Sector:"
+            if part
         )
         leads.append(
             _finalize_lead(
@@ -458,17 +462,21 @@ def transform_opentender(payload) -> list[dict]:
                     "External_Project_Code": generate_external_code("OT", raw_id),
                     "Lead_Source_Name": "OpenTender",
                     "Country": "Sweden",
-                    "Construction_Project_Phase": map_phase_to_optionset(status),
+                    "Construction_Project_Phase": map_phase_to_optionset(
+                        _opentender_status(record)
+                    ),
                     "Total_Value": parse_float(amount),
                     "Currency": sanitize_text(currency, 10).upper() or "SEK",
                     "Notes": notes,
-                    "Tender_Closing_Date": parse_date(
-                        record.get("bidDeadline")
-                        or record.get("deadline")
-                        or record.get("tenderDeadline")
-                    ),
+                    "Tender_Closing_Date": parse_date(_opentender_lot_date(record, (
+                        "bidDeadline",
+                        "deadline",
+                        "tenderDeadline",
+                    ))),
                     "Tender_Award_Date": parse_date(
-                        record.get("awardDecisionDate") or record.get("awardDate")
+                        record.get("awardDecisionDate")
+                        or record.get("awardDate")
+                        or _opentender_lot_date(record, ("awardDecisionDate", "awardDate"))
                     ),
                     "Construction_Start_Date": parse_date(
                         record.get("startDate") or record.get("constructionStart")
@@ -661,6 +669,12 @@ def _iter_opentender_records(payload):
         return
     if not isinstance(payload, dict):
         return
+    data = payload.get("data")
+    if isinstance(data, dict):
+        nested_hits = data.get("hits")
+        if isinstance(nested_hits, dict) and isinstance(nested_hits.get("hits"), list):
+            yield from nested_hits["hits"]
+            return
     hits = payload.get("hits")
     if isinstance(hits, dict) and isinstance(hits.get("hits"), list):
         for hit in hits["hits"]:
@@ -697,6 +711,52 @@ def _is_construction_record(record: dict) -> bool:
     return any(token in sector for token in ("construction", "bygg", "anlägg", "anlagg"))
 
 
+def _first_opentender_buyer(record: dict) -> dict:
+    buyers = record.get("buyers")
+    if isinstance(buyers, list):
+        for buyer in buyers:
+            if isinstance(buyer, dict):
+                return buyer
+    buyer = record.get("buyer")
+    return buyer if isinstance(buyer, dict) else {}
+
+
+def _opentender_status(record: dict) -> str:
+    publications = record.get("publications") or []
+    form = ""
+    if publications and isinstance(publications[0], dict):
+        form = str(publications[0].get("formType") or "")
+    if "AWARD" in form.upper():
+        return "awarded"
+    procedure = str(record.get("procedureType") or record.get("status") or "")
+    if procedure:
+        return f"tender {procedure}"
+    return form or "planned"
+
+
+def _opentender_lot_date(record: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if record.get(key):
+            return record.get(key)
+    for lot in _as_list(record.get("lots")):
+        if not isinstance(lot, dict):
+            continue
+        for key in keys:
+            if lot.get(key):
+                return lot.get(key)
+    return None
+
+
+def _first_text(value) -> str:
+    if isinstance(value, list):
+        for item in value:
+            text = _first_text(item)
+            if text:
+                return text
+        return ""
+    return sanitize_text(value, 100)
+
+
 def _opentender_amount(record: dict) -> tuple[object, object]:
     for key in ("estimatedPrice", "finalPrice", "value", "totalValue", "amount"):
         raw = record.get(key)
@@ -707,6 +767,13 @@ def _opentender_amount(record: dict) -> tuple[object, object]:
                 return amount, currency
         elif raw is not None and not isinstance(raw, (list, dict)):
             return raw, record.get("currency")
+    for lot in _as_list(record.get("lots")):
+        if not isinstance(lot, dict):
+            continue
+        for key in ("estimatedPrice", "finalPrice"):
+            raw = lot.get(key)
+            if isinstance(raw, dict) and raw.get("netAmount") is not None:
+                return raw.get("netAmount"), raw.get("currency") or record.get("currency")
     return None, record.get("currency")
 
 

@@ -19,9 +19,10 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 TRAFIKVERKET_URL = "https://api.trafikinfo.trafikverket.se/v2/data.json"
 TED_URL = "https://api.ted.europa.eu/v3/notices/search"
-OPENTENDER_URL = "https://opentender.eu/api/se/search"
+OPENTENDER_URL = "https://api.opentender.eu/api/se/tender/search"
+OPENTENDER_PAGE_SIZE = 80
 
-USER_AGENT = "HeidelbergSwedenRMC-Staging/1.0"
+USER_AGENT = "MR-Project-Staging/1.0"
 REQUEST_TIMEOUT = 90
 
 # Swedish works notices published since 1 September 2026 whose procedure value
@@ -125,13 +126,28 @@ def fetch_ted() -> dict:
 
 
 def fetch_opentender() -> dict | list:
-    """GET municipal construction notices from the OpenTender Sweden search API."""
+    """POST a construction-works search to the OpenTender Sweden API.
+
+    The public site calls ``api.opentender.eu``, not ``opentender.eu/api/se/search``.
+    Results are the newest works notices whose text matches construction.
+    """
     response = _request(
-        "GET",
+        "POST",
         OPENTENDER_URL,
-        params={"Sector": "Construction"},
+        json={
+            "filters": [
+                {"field": "freetext", "value": "construction", "type": "text"},
+                {"field": "supplyType", "value": ["WORKS"], "type": "term"},
+            ],
+            "totalHitsWithoutFilters": True,
+            "size": OPENTENDER_PAGE_SIZE,
+            "sort": {"field": "tender_publication_date", "order": "DESC"},
+            "lang": "en",
+        },
         headers={
             "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": "https://opentender.eu",
             "User-Agent": USER_AGENT,
         },
     )
