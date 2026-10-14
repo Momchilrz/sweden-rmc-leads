@@ -31,8 +31,7 @@ def main() -> None:
     _run_scheduled_refresh()
 
     if st.button("Fetch latest data", type="primary"):
-        with st.spinner("Fetching Trafikverket, TED, and OpenTender…"):
-            summary = run_etl_pipeline()
+        summary = _refresh("Fetching Trafikverket, TED, and OpenTender…")
         st.session_state["last_run"] = summary
         load_leads.clear()
 
@@ -75,32 +74,38 @@ def _inject_brand_css() -> None:
           div[data-testid="stMetricLabel"] p {{
             color: {BRAND};
           }}
-          [data-testid="stMarkdown"],
-          [data-testid="stMarkdownContainer"] {{
-            overflow: visible;
+          .mast {{
+            padding: 0.25rem 0 1.25rem;
           }}
-          .mr-stamp {{
-            border: 3px solid {BRAND};
+          .kicker {{
+            margin: 0;
             color: {BRAND};
-            font-weight: 800;
-            letter-spacing: 0.18em;
-            text-align: center;
-            font-size: 28px;
-            line-height: 36px;
-            padding: 14px 10px 10px;
-            margin-top: 8px;
-            display: block;
+            font-size: 0.82rem;
+            font-weight: 650;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            line-height: 1.4;
           }}
-          .mr-real {{
-            color: #1A241C;
-            font-size: 0.92rem;
-            line-height: 1.35;
-            margin: 0.55rem 0 0;
+          .mast a {{
+            display: none;
           }}
-          .mr-rule {{
-            height: 4px;
-            background: {BRAND};
-            margin: 0.35rem 0 0.9rem;
+          .mast h1 {{
+            margin: 0.7rem 0 0.35rem;
+            font-size: 2rem;
+            line-height: 1.15;
+            font-weight: 650;
+          }}
+          .lede {{
+            margin: 0;
+            max-width: 40rem;
+            color: #2C2C2C;
+            font-size: 0.98rem;
+            line-height: 1.45;
+          }}
+          .meta {{
+            margin: 0.35rem 0 0;
+            color: #6B6B6B;
+            font-size: 0.86rem;
           }}
         </style>
         """,
@@ -109,24 +114,17 @@ def _inject_brand_css() -> None:
 
 
 def _render_header() -> None:
-    name_col, stamp_col = st.columns([4.2, 1.6])
-    with name_col:
-        st.header("MR Project")
-    with stamp_col:
-        st.markdown(
-            """
-            <div class="mr-stamp">TEST</div>
-            <p class="mr-real">Test environment. The project records are real public notices, not sample data.</p>
-            """,
-            unsafe_allow_html=True,
-        )
-    st.markdown('<div class="mr-rule"></div>', unsafe_allow_html=True)
-    st.title("Sweden RMC lead staging")
-    upcoming = next_slot().strftime("%d %b %Y, 06:00")
-    st.caption(
-        "Public Swedish construction projects, held locally for business verification. "
-        "This desk does not authenticate to Dynamics 365. "
-        f"Data is pulled automatically once a day at 06:00 Swedish time. Next slot: {upcoming}."
+    upcoming = next_slot().strftime("%d %b %Y, %H:%M")
+    st.markdown(
+        f"""
+        <header class="mast">
+          <p class="kicker">MR Project · Test</p>
+          <h1>Sweden RMC lead staging</h1>
+          <p class="lede">Real public notices from Sweden, kept here so they can be checked before any CRM load. This is a test desk. The rows are not sample data.</p>
+          <p class="meta">Refreshes daily at 06:00 Swedish time. Next slot: {upcoming}.</p>
+        </header>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -136,10 +134,22 @@ def _run_scheduled_refresh() -> None:
     st.session_state["schedule_checked"] = True
     if not scheduled_run_is_due():
         return
-    with st.spinner("Daily refresh for 06:00 Swedish time…"):
-        summary = run_etl_pipeline()
+    summary = _refresh("Daily refresh for 06:00 Swedish time…")
     st.session_state["last_run"] = summary
     load_leads.clear()
+
+
+def _refresh(label: str) -> dict:
+    try:
+        with st.spinner(label):
+            return run_etl_pipeline()
+    except Exception as exc:
+        return {
+            "fetched": {},
+            "upserted": {},
+            "errors": [f"Refresh stopped: {exc.__class__.__name__}"],
+            "total_upserted": 0,
+        }
 
 
 def _render_run_summary(summary: dict) -> None:

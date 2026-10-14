@@ -1,23 +1,72 @@
 """Local SQLite staging store shaped like a future Dynamics 365 lead schema.
 
 This module never connects to Dataverse or Dynamics 365. It only creates and
-reads ``rmc_leads_staging.db`` beside this file.
+reads ``rmc_leads_staging.db``. On Streamlit Cloud the repository copy is not
+writable, so the file is copied to a temporary directory before any refresh.
 """
 
+import shutil
+import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 
 DB_FILENAME = "rmc_leads_staging.db"
-DB_PATH = Path(__file__).resolve().parent / DB_FILENAME
+BUNDLED_DB_PATH = Path(__file__).resolve().parent / DB_FILENAME
+
+
+def _sqlite_file_is_writable(path: Path) -> bool:
+    """True when SQLite can create a table in this file."""
+    if not path.exists():
+        return False
+    try:
+        connection = sqlite3.connect(path, timeout=5)
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS _write_probe (id INTEGER)")
+            connection.execute("DROP TABLE _write_probe")
+            connection.commit()
+        finally:
+            connection.close()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _runtime_db_path() -> Path:
+    if _sqlite_file_is_writable(BUNDLED_DB_PATH):
+        return BUNDLED_DB_PATH
+    runtime_dir = Path(tempfile.gettempdir()) / "mr-project"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime_path = runtime_dir / DB_FILENAME
+    if BUNDLED_DB_PATH.exists():
+        bundled_is_newer = (
+            not runtime_path.exists()
+            or BUNDLED_DB_PATH.stat().st_mtime > runtime_path.stat().st_mtime
+        )
+        if bundled_is_newer:
+            shutil.copy2(BUNDLED_DB_PATH, runtime_path)
+    return runtime_path
+
+
+DB_PATH = _runtime_db_path()
 DATABASE_URL = "sqlite:///" + DB_PATH.as_posix()
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    poolclass=NullPool,
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_timeout(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA busy_timeout = 30000")
+    cursor.close()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -120,7 +169,6 @@ def record_etl_run(summary: dict) -> None:
         session.commit()
     except Exception:
         session.rollback()
-        raise
     finally:
         session.close()
 
