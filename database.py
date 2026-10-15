@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine, event
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -95,12 +95,32 @@ class Lead(Base):
     Address_1_Country = Column(String(50), default="Sweden", nullable=False)
     Address_1_Latitude = Column(Float, nullable=True)
     Address_1_Longitude = Column(Float, nullable=True)
+    Buyer_Name = Column(String(200), nullable=True)
+    Cpv_Codes = Column(String(200), nullable=True)
+    Notice_Type = Column(String(80), nullable=True)
+    Published_On = Column(DateTime, nullable=True)
+    Notice_Url = Column(String(300), nullable=True)
     Created_On = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 def init_db() -> None:
-    """Create the staging tables if they do not exist yet."""
+    """Create the staging tables and add any columns introduced after the first snapshot."""
     Base.metadata.create_all(engine)
+    added_columns = {
+        "Buyer_Name": "VARCHAR(200)",
+        "Cpv_Codes": "VARCHAR(200)",
+        "Notice_Type": "VARCHAR(80)",
+        "Published_On": "DATETIME",
+        "Notice_Url": "VARCHAR(300)",
+    }
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(leads)")).fetchall()
+        }
+        for name, column_type in added_columns.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE leads ADD COLUMN {name} {column_type}"))
 
 
 class EtlRun(Base):

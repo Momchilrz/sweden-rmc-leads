@@ -46,6 +46,10 @@ FIELD_LIMITS = {
     "Address_1_City": 40,
     "Address_1_State_Province": 100,
     "Address_1_Country": 50,
+    "Buyer_Name": 200,
+    "Cpv_Codes": 200,
+    "Notice_Type": 80,
+    "Notice_Url": 300,
 }
 
 SWEDISH_COUNTIES = {
@@ -271,15 +275,7 @@ def transform_trafikverket(payload) -> list[dict]:
             county_names = _county_names(deviation.get("CountyNo"))
             raw_id = deviation.get("Id") or situation.get("Id")
             message = sanitize_text(deviation.get("Message"), 800)
-            notes = " | ".join(
-                part
-                for part in (
-                    location,
-                    message,
-                    f"Situation {situation.get('Id')}" if situation.get("Id") else "",
-                )
-                if part
-            )
+            notes = " | ".join(part for part in (location, message) if part)
             leads.append(
                 _finalize_lead(
                     {
@@ -301,6 +297,11 @@ def transform_trafikverket(payload) -> list[dict]:
                         "Address_1_Country": "Sweden",
                         "Address_1_Latitude": latitude,
                         "Address_1_Longitude": longitude,
+                        "Buyer_Name": None,
+                        "Cpv_Codes": None,
+                        "Notice_Type": sanitize_text(deviation.get("MessageType"), 80),
+                        "Published_On": parse_date(situation.get("PublicationTime")),
+                        "Notice_Url": None,
                     }
                 )
             )
@@ -345,23 +346,11 @@ def transform_ted(payload) -> list[dict]:
             notice.get("place-of-performance-subdiv-proc")
             or notice.get("buyer-country-sub")
         )
-        notice_type = sanitize_text(notice.get("notice-type"), 40)
-        published = sanitize_text(notice.get("publication-date"), 40)
+        notice_type = sanitize_text(notice.get("notice-type"), 80)
         notice_url = (
             f"https://ted.europa.eu/sv/notice/-/detail/{publication_number}"
             if publication_number
             else ""
-        )
-        notes = " | ".join(
-            part
-            for part in (
-                f"Buyer: {buyer}" if buyer else "",
-                f"CPV: {', '.join(cpv_codes)}" if cpv_codes else "",
-                f"Notice type: {notice_type}" if notice_type else "",
-                f"Published: {published}" if published else "",
-                notice_url,
-            )
-            if part
         )
         leads.append(
             _finalize_lead(
@@ -375,7 +364,12 @@ def transform_ted(payload) -> list[dict]:
                     "Construction_Project_Phase": map_phase_to_optionset(notice_type),
                     "Total_Value": value,
                     "Currency": currency or "SEK",
-                    "Notes": notes,
+                    "Notes": None,
+                    "Buyer_Name": buyer,
+                    "Cpv_Codes": ", ".join(cpv_codes),
+                    "Notice_Type": notice_type,
+                    "Published_On": parse_date(notice.get("publication-date")),
+                    "Notice_Url": notice_url,
                     "Tender_Closing_Date": parse_date(
                         notice.get("deadline-receipt-tender-date-lot")
                     ),
@@ -444,16 +438,18 @@ def transform_opentender(payload) -> list[dict]:
                 cpv_names.append(sanitize_text(cpv.get("code"), 12))
             elif cpv:
                 cpv_names.append(sanitize_text(cpv, 12))
-        published = sanitize_text(record.get("tender_publication_date"), 20)
-        notes = " | ".join(
-            part
-            for part in (
-                f"Buyer: {buyer_name}" if buyer_name else "",
-                f"CPV: {', '.join(cpv_names)}" if cpv_names else "",
-                f"Published: {published}" if published else "",
-                sanitize_text(record.get("description") or record.get("summary"), 600),
+        publications = record.get("publications") or []
+        notice_url = ""
+        if publications and isinstance(publications[0], dict):
+            notice_url = (
+                publications[0].get("humanReadableUrl")
+                or publications[0].get("machineReadableUrl")
+                or ""
             )
-            if part
+        notice_type = sanitize_text(
+            record.get("procedureType")
+            or (publications[0].get("formType") if publications and isinstance(publications[0], dict) else ""),
+            80,
         )
         leads.append(
             _finalize_lead(
@@ -467,7 +463,12 @@ def transform_opentender(payload) -> list[dict]:
                     ),
                     "Total_Value": parse_float(amount),
                     "Currency": sanitize_text(currency, 10).upper() or "SEK",
-                    "Notes": notes,
+                    "Notes": sanitize_text(record.get("description") or record.get("summary"), 2000),
+                    "Buyer_Name": buyer_name,
+                    "Cpv_Codes": ", ".join(cpv_names),
+                    "Notice_Type": notice_type,
+                    "Published_On": parse_date(record.get("tender_publication_date")),
+                    "Notice_Url": notice_url,
                     "Tender_Closing_Date": parse_date(_opentender_lot_date(record, (
                         "bidDeadline",
                         "deadline",
@@ -539,6 +540,13 @@ def _finalize_lead(row: dict) -> dict:
         or "Sweden",
         "Address_1_Latitude": parse_float(row.get("Address_1_Latitude")),
         "Address_1_Longitude": parse_float(row.get("Address_1_Longitude")),
+        "Buyer_Name": _empty_as_none(sanitize_text(row.get("Buyer_Name"), FIELD_LIMITS["Buyer_Name"])),
+        "Cpv_Codes": _empty_as_none(sanitize_text(row.get("Cpv_Codes"), FIELD_LIMITS["Cpv_Codes"])),
+        "Notice_Type": _empty_as_none(
+            sanitize_text(row.get("Notice_Type"), FIELD_LIMITS["Notice_Type"])
+        ),
+        "Published_On": parse_date(row.get("Published_On")),
+        "Notice_Url": _empty_as_none(sanitize_text(row.get("Notice_Url"), FIELD_LIMITS["Notice_Url"])),
     }
     if not lead["External_Project_Code"]:
         lead["External_Project_Code"] = generate_external_code(

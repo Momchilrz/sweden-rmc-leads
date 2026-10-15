@@ -23,6 +23,59 @@ st.set_page_config(
 
 PHASE_ORDER = [948050000, 948050001, 948050002, 948050003]
 
+COLUMN_ORDER = [
+    "Project_Name",
+    "Lead_Source_Name",
+    "Buyer_Name",
+    "Phase",
+    "Construction_Project_Phase",
+    "Notice_Type",
+    "Cpv_Codes",
+    "Total_Value",
+    "Currency",
+    "Published_On",
+    "Tender_Closing_Date",
+    "Tender_Award_Date",
+    "Construction_Start_Date",
+    "Construction_End_Date",
+    "Address_1_City",
+    "Address_1_State_Province",
+    "Address_1_Postal_Code",
+    "Address_1_Latitude",
+    "Address_1_Longitude",
+    "Notice_Url",
+    "External_Project_Code",
+    "Notes",
+]
+ALWAYS_VISIBLE = {
+    "Project_Name",
+    "Lead_Source_Name",
+    "Phase",
+    "Construction_Project_Phase",
+    "Total_Value",
+    "Currency",
+    "Address_1_City",
+    "Address_1_State_Province",
+    "Address_1_Postal_Code",
+    "Notice_Type",
+    "Published_On",
+    "External_Project_Code",
+    "Notes",
+}
+SHARED_BY_SOURCE = {
+    "Buyer_Name": {"EU_TED", "OpenTender"},
+    "Cpv_Codes": {"EU_TED", "OpenTender"},
+    "Tender_Closing_Date": {"EU_TED", "OpenTender"},
+    "Tender_Award_Date": {"EU_TED", "OpenTender"},
+    "Notice_Url": {"EU_TED", "OpenTender"},
+}
+EXCLUSIVE_TO_SOURCE = {
+    "Construction_Start_Date": "Trafikverket",
+    "Construction_End_Date": "Trafikverket",
+    "Address_1_Latitude": "Trafikverket",
+    "Address_1_Longitude": "Trafikverket",
+}
+
 
 def main() -> None:
     init_db()
@@ -46,8 +99,8 @@ def main() -> None:
 
     prepared = _prepare(frame)
     _render_kpis(prepared)
-    filtered = _render_filters(prepared)
-    _render_table(filtered)
+    filtered, selected_sources = _render_filters(prepared)
+    _render_table(filtered, selected_sources)
 
 
 def _inject_brand_css() -> None:
@@ -203,13 +256,29 @@ def _render_filters(frame: pd.DataFrame) -> pd.DataFrame:
             + filtered["Address_1_City"].fillna("")
             + " "
             + filtered["External_Project_Code"].fillna("")
+            + " "
+            + filtered.get("Buyer_Name", pd.Series("", index=filtered.index)).fillna("")
         ).str.lower()
         filtered = filtered[haystack.str.contains(needle, regex=False)]
     st.caption(f"{len(filtered):,} of {len(frame):,} leads match the filters.")
-    return filtered
+    return filtered, selected_sources
 
 
-def _render_table(frame: pd.DataFrame) -> None:
+def _visible_columns(selected_sources: list[str]) -> list[str]:
+    chosen = set(selected_sources)
+    visible = set(ALWAYS_VISIBLE)
+    for column, owners in SHARED_BY_SOURCE.items():
+        if chosen & owners:
+            visible.add(column)
+    if len(chosen) == 1:
+        only = next(iter(chosen))
+        for column, owner in EXCLUSIVE_TO_SOURCE.items():
+            if owner == only:
+                visible.add(column)
+    return [column for column in COLUMN_ORDER if column in visible]
+
+
+def _render_table(frame: pd.DataFrame, selected_sources: list[str]) -> None:
     display = frame.copy()
     display.insert(
         3,
@@ -218,23 +287,7 @@ def _render_table(frame: pd.DataFrame) -> None:
             lambda phase: PHASE_LABELS.get(int(phase), "Unknown") if pd.notna(phase) else ""
         ),
     )
-    columns = [
-        "Project_Name",
-        "Lead_Source_Name",
-        "Phase",
-        "Construction_Project_Phase",
-        "Total_Value",
-        "Currency",
-        "Address_1_City",
-        "Address_1_State_Province",
-        "Address_1_Postal_Code",
-        "Tender_Closing_Date",
-        "Tender_Award_Date",
-        "Construction_Start_Date",
-        "Construction_End_Date",
-        "External_Project_Code",
-        "Notes",
-    ]
+    columns = [column for column in _visible_columns(selected_sources) if column in display.columns]
     shown = display[columns]
     event = st.dataframe(
         shown,
@@ -249,13 +302,24 @@ def _render_table(frame: pd.DataFrame) -> None:
             "Tender_Award_Date": st.column_config.DatetimeColumn("Award date"),
             "Construction_Start_Date": st.column_config.DatetimeColumn("Construction start"),
             "Construction_End_Date": st.column_config.DatetimeColumn("Construction end"),
+            "Published_On": st.column_config.DatetimeColumn("Published"),
+            "Notice_Url": st.column_config.LinkColumn("Notice"),
+            "Buyer_Name": st.column_config.TextColumn("Buyer"),
+            "Cpv_Codes": st.column_config.TextColumn("CPV"),
+            "Notice_Type": st.column_config.TextColumn("Notice type"),
         },
     )
     selected = event.selection.rows if event is not None else []
     if selected:
-        row = shown.iloc[selected[0]]
+        row = display.iloc[selected[0]]
         st.subheader(row["Project_Name"])
-        st.write(row["Notes"] or "No notes on this lead.")
+        if row.get("Buyer_Name"):
+            st.write(row["Buyer_Name"])
+        if row.get("Cpv_Codes"):
+            st.caption(f"CPV {row['Cpv_Codes']}")
+        st.write(row["Notes"] or "No description on this lead.")
+        if row.get("Notice_Url"):
+            st.markdown(f"[Open the notice]({row['Notice_Url']})")
         st.caption(row["External_Project_Code"])
 
 
@@ -272,6 +336,7 @@ def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
         "Tender_Award_Date",
         "Construction_Start_Date",
         "Construction_End_Date",
+        "Published_On",
         "Created_On",
     ):
         if column in prepared.columns:
