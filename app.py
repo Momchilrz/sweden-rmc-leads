@@ -5,6 +5,8 @@ Reading and refreshing this app does not connect to Dynamics 365 or Dataverse.
 
 from __future__ import annotations
 
+import io
+
 import pandas as pd
 import streamlit as st
 
@@ -75,6 +77,26 @@ EXCLUSIVE_TO_SOURCE = {
     "Address_1_Latitude": "Trafikverket",
     "Address_1_Longitude": "Trafikverket",
 }
+FILTER_FIELDS = [
+    ("Project_Name", "Project name", "text"),
+    ("Buyer_Name", "Buyer", "text"),
+    ("Address_1_City", "City", "text"),
+    ("Address_1_State_Province", "Province", "text"),
+    ("Cpv_Codes", "CPV", "text"),
+    ("Notice_Type", "Notice type", "text"),
+    ("Currency", "Currency", "text"),
+    ("External_Project_Code", "External code", "text"),
+    ("Notes", "Notes", "text"),
+    ("Total_Value", "Total value", "number"),
+    ("Published_On", "Published", "date"),
+    ("Tender_Closing_Date", "Tender closing", "date"),
+    ("Tender_Award_Date", "Award date", "date"),
+    ("Construction_Start_Date", "Construction start", "date"),
+    ("Construction_End_Date", "Construction end", "date"),
+]
+TEXT_OPERATORS = ["Contains", "Does not contain", "Equals", "Begins with", "Is empty"]
+NUMBER_OPERATORS = ["Equals", "Greater than", "Less than", "Greater or equal", "Less or equal"]
+DATE_OPERATORS = ["On", "Before", "After", "Is empty"]
 
 
 def main() -> None:
@@ -268,7 +290,7 @@ def _render_kpis(frame: pd.DataFrame) -> None:
     st.caption("Pipeline value by source currency: " + (" · ".join(value_bits) if value_bits else "no values published"))
 
 
-def _render_filters(frame: pd.DataFrame) -> pd.DataFrame:
+def _render_filters(frame: pd.DataFrame):
     sources = sorted(frame["Lead_Source_Name"].dropna().unique().tolist())
     present_phases = [
         phase for phase in PHASE_ORDER if phase in set(frame["Construction_Project_Phase"].dropna())
@@ -281,12 +303,13 @@ def _render_filters(frame: pd.DataFrame) -> pd.DataFrame:
         default=present_phases,
         format_func=lambda phase: f"{PHASE_LABELS.get(int(phase), 'Unknown')} ({int(phase)})",
     )
-    query = right.text_input("Search name, city, or external code")
+    query = right.text_input("Quick find")
 
     filtered = frame[
         frame["Lead_Source_Name"].isin(selected_sources)
         & frame["Construction_Project_Phase"].isin(selected_phases)
     ]
+    filtered = _apply_view_filters(filtered, _render_condition_builder())
     if query.strip():
         needle = query.strip().lower()
         haystack = (
@@ -299,8 +322,139 @@ def _render_filters(frame: pd.DataFrame) -> pd.DataFrame:
             + filtered.get("Buyer_Name", pd.Series("", index=filtered.index)).fillna("")
         ).str.lower()
         filtered = filtered[haystack.str.contains(needle, regex=False)]
-    st.caption(f"{len(filtered):,} of {len(frame):,} leads match the filters.")
+    count_col, export_col = st.columns([4, 1])
+    count_col.caption(f"{len(filtered):,} of {len(frame):,} leads match the filters.")
+    export_col.download_button(
+        "Export to Excel",
+        data=_excel_bytes(filtered, selected_sources),
+        file_name="mr-project-leads.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
     return filtered, selected_sources
+
+
+def _excel_bytes(frame: pd.DataFrame, selected_sources: list[str]) -> bytes:
+    """Workbook of the rows and columns currently shown in the lead view."""
+    display = frame.copy()
+    if "Construction_Project_Phase" in display.columns:
+        display.insert(
+            3,
+            "Phase",
+            display["Construction_Project_Phase"].map(
+                lambda phase: PHASE_LABELS.get(int(phase), "") if pd.notna(phase) else ""
+            ),
+        )
+    columns = [column for column in _visible_columns(selected_sources) if column in display.columns]
+    export = display[columns].copy()
+    for column in export.columns:
+        if pd.api.types.is_datetime64_any_dtype(export[column]):
+            export[column] = export[column].dt.tz_localize(None) if export[column].dt.tz is not None else export[column]
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export.to_excel(writer, index=False, sheet_name="Leads")
+    return buffer.getvalue()
+
+
+def _render_condition_builder() -> list[dict]:
+    """Dynamics-style field, operator, and value conditions. All conditions apply together."""
+    if "grid_filters" not in st.session_state:
+        st.session_state["grid_filters"] = []
+
+    with st.expander("Edit filters", expanded=bool(st.session_state["grid_filters"])):
+        labels = [label for _field, label, _kind in FILTER_FIELDS]
+        by_label = {label: (field, kind) for field, label, kind in FILTER_FIELDS}
+        field_col, operator_col, value_col = st.columns([1.4, 1.2, 1.4])
+        label = field_col.selectbox("Field", labels, key="filter_field")
+        field, kind = by_label[label]
+        operators = {"text": TEXT_OPERATORS, "number": NUMBER_OPERATORS, "date": DATE_OPERATORS}[kind]
+        operator = operator_col.selectbox("Operator", operators, key="filter_operator")
+        value = None
+        if operator != "Is empty":
+            if kind == "number":
+                value = value_col.number_input("Value", key="filter_number", value=0.0, step=1000.0)
+            elif kind == "date":
+                value = value_col.date_input("Value", key="filter_date")
+            else:
+                value = value_col.text_input("Value", key="filter_text")
+        if st.button("Add condition"):
+            st.session_state["grid_filters"].append(
+                {"field": field, "label": label, "kind": kind, "op": operator, "value": value}
+            )
+            st.rerun()
+
+        remaining = []
+        for index, condition in enumerate(st.session_state["grid_filters"]):
+            shown_value = "" if condition["op"] == "Is empty" else f" {condition['value']}"
+            line, remove = st.columns([6, 1])
+            line.write(f"{condition['label']} {condition['op']}{shown_value}")
+            if remove.button("Remove", key=f"remove_filter_{index}"):
+                continue
+            remaining.append(condition)
+        if len(remaining) != len(st.session_state["grid_filters"]):
+            st.session_state["grid_filters"] = remaining
+            st.rerun()
+
+    return list(st.session_state["grid_filters"])
+
+
+def _apply_view_filters(frame: pd.DataFrame, conditions: list[dict]) -> pd.DataFrame:
+    result = frame
+    for condition in conditions:
+        field = condition["field"]
+        if field not in result.columns:
+            continue
+        series = result[field]
+        operator = condition["op"]
+        kind = condition["kind"]
+        if operator == "Is empty":
+            if kind == "text":
+                mask = series.fillna("").astype(str).str.strip().eq("")
+            else:
+                mask = series.isna()
+        elif kind == "text":
+            text = series.fillna("").astype(str)
+            needle = str(condition.get("value") or "")
+            lowered = text.str.lower()
+            query = needle.lower()
+            if operator == "Contains":
+                mask = lowered.str.contains(query, regex=False)
+            elif operator == "Does not contain":
+                mask = ~lowered.str.contains(query, regex=False)
+            elif operator == "Equals":
+                mask = lowered.eq(query)
+            elif operator == "Begins with":
+                mask = lowered.str.startswith(query)
+            else:
+                mask = pd.Series(True, index=result.index)
+        elif kind == "number":
+            numbers = pd.to_numeric(series, errors="coerce")
+            amount = pd.to_numeric(condition.get("value"), errors="coerce")
+            if pd.isna(amount):
+                continue
+            comparisons = {
+                "Equals": numbers.eq(amount),
+                "Greater than": numbers.gt(amount),
+                "Less than": numbers.lt(amount),
+                "Greater or equal": numbers.ge(amount),
+                "Less or equal": numbers.le(amount),
+            }
+            mask = comparisons.get(operator, pd.Series(True, index=result.index))
+        else:
+            dates = pd.to_datetime(series, errors="coerce")
+            day = pd.to_datetime(condition.get("value"), errors="coerce")
+            if pd.isna(day):
+                continue
+            if operator == "On":
+                mask = dates.dt.normalize().eq(day.normalize())
+            elif operator == "Before":
+                mask = dates.lt(day)
+            elif operator == "After":
+                mask = dates.gt(day)
+            else:
+                mask = pd.Series(True, index=result.index)
+        result = result[mask.fillna(False)]
+    return result
 
 
 def _visible_columns(selected_sources: list[str]) -> list[str]:
