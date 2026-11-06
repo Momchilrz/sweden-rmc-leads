@@ -787,3 +787,577 @@ def _opentender_amount(record: dict) -> tuple[object, object]:
 
 def _empty_as_none(value: str):
     return value or None
+
+
+# New-country codes must not reuse the Swedish prefixes. Publication numbers
+# are global, so a Belgian TED notice that shared TED- would overwrite Sweden.
+SWEDISH_CODE_PREFIXES = ("TRV-", "TED-", "OT-")
+SUPPLY_CATEGORIES = {"goods", "supplies", "supply"}
+SERVICE_CATEGORIES = {"services", "service"}
+
+
+def transform_uk_find_a_tender(payload) -> list[dict]:
+    """Map Find a Tender OCDS releases onto staging leads."""
+    return _transform_ocds(
+        payload,
+        "UK_Find_a_Tender",
+        "United Kingdom",
+        "UKFT",
+        "GBP",
+        _find_a_tender_url,
+    )
+
+
+def transform_uk_contracts_finder(payload) -> list[dict]:
+    """Map Contracts Finder OCDS releases onto staging leads."""
+    return _transform_ocds(
+        payload,
+        "UK_Contracts_Finder",
+        "United Kingdom",
+        "UKCF",
+        "GBP",
+        _contracts_finder_url,
+    )
+
+
+def transform_be_ted(payload) -> list[dict]:
+    """Map Belgian TED notices. Rows below a value screen are kept."""
+    return _transform_ted_market(payload, "BE_TED", "Belgium", "BETED", ("fra", "nld", "deu", "eng", "en"))
+
+
+def transform_nl_ted(payload) -> list[dict]:
+    """Map Dutch TED notices. Rows below a value screen are kept."""
+    return _transform_ted_market(payload, "NL_TED", "Netherlands", "NLTED", ("nld", "eng", "en"))
+
+
+def transform_nl_tenderned(payload) -> list[dict]:
+    """Map TenderNed publications. Works stay; services are dropped."""
+    rows = (payload or {}).get("publicaties") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    leads = []
+    for row in rows:
+        if not isinstance(row, dict) or not _keep_tenderned(row):
+            continue
+        publication_id = row.get("publicatieId")
+        detail_type = row.get("aankondigingCode") if isinstance(row.get("aankondigingCode"), dict) else {}
+        list_type = row.get("typePublicatie") if isinstance(row.get("typePublicatie"), dict) else {}
+        notice_type = (
+            detail_type.get("omschrijving")
+            or list_type.get("omschrijving")
+            or row.get("typePublicatie")
+            or row.get("formType")
+        )
+        link = row.get("link") if isinstance(row.get("link"), dict) else {}
+        notice_url = link.get("href") or ""
+        if not notice_url and publication_id:
+            notice_url = f"https://www.tenderned.nl/aankondigingen/overzicht/{publication_id}"
+        leads.append(
+            _guard_new_code(
+                _finalize_lead(
+                    {
+                        "Project_Name": row.get("aanbestedingNaam") or "TenderNed notice",
+                        "External_Project_Code": generate_external_code("NLTN", publication_id),
+                        "Lead_Source_Name": "NL_TenderNed",
+                        "Country": "Netherlands",
+                        "Construction_Project_Phase": _tenderned_phase(row),
+                        "Total_Value": None,
+                        "Currency": "EUR",
+                        "Notes": row.get("opdrachtBeschrijving"),
+                        "Buyer_Name": row.get("opdrachtgeverNaam"),
+                        "Cpv_Codes": _join_cpv(_tenderned_cpv_codes(row)),
+                        "Notice_Type": notice_type,
+                        "Published_On": row.get("publicatieDatum"),
+                        "Notice_Url": notice_url,
+                        "Tender_Closing_Date": row.get("sluitingsDatum"),
+                        "Tender_Award_Date": None,
+                        "Construction_Start_Date": None,
+                        "Construction_End_Date": None,
+                        "Address_1_Postal_Code": None,
+                        "Address_1_City": None,
+                        "Address_1_State_Province": _tenderned_region(row),
+                        "Address_1_Country": "Netherlands",
+                        "Address_1_Latitude": None,
+                        "Address_1_Longitude": None,
+                    }
+                )
+            )
+        )
+    return _dedupe_codes(leads)
+
+
+def _transform_ted_market(payload, source: str, country: str, prefix: str, languages: tuple[str, ...]) -> list[dict]:
+    notices = (payload or {}).get("notices") if isinstance(payload, dict) else None
+    if not isinstance(notices, list):
+        return []
+    leads = []
+    for notice in notices:
+        if not isinstance(notice, dict):
+            continue
+        cpv_codes = _ordered_cpv(_cpv_from_ted(notice))
+        if not any(_is_construction_cpv(code) for code in cpv_codes):
+            continue
+        publication_number = sanitize_text(notice.get("publication-number"), 40)
+        value, currency = _market_value(notice, "EUR")
+        notice_type = sanitize_text(notice.get("notice-type"), 80)
+        notice_url = (
+            f"https://ted.europa.eu/en/notice/-/detail/{publication_number}"
+            if publication_number
+            else ""
+        )
+        leads.append(
+            _guard_new_code(
+                _finalize_lead(
+                    {
+                        "Project_Name": _market_title(notice, languages) or f"TED notice {publication_number}",
+                        "External_Project_Code": generate_external_code(prefix, publication_number),
+                        "Lead_Source_Name": source,
+                        "Country": country,
+                        "Construction_Project_Phase": map_phase_to_optionset(notice_type),
+                        "Total_Value": value,
+                        "Currency": currency,
+                        "Notes": None,
+                        "Buyer_Name": _pick_localized(notice.get("buyer-name"), languages),
+                        "Cpv_Codes": _join_cpv(cpv_codes),
+                        "Notice_Type": notice_type,
+                        "Published_On": notice.get("publication-date"),
+                        "Notice_Url": notice_url,
+                        "Tender_Closing_Date": notice.get("deadline-receipt-tender-date-lot"),
+                        "Tender_Award_Date": notice.get("contract-conclusion-date"),
+                        "Construction_Start_Date": None,
+                        "Construction_End_Date": None,
+                        "Address_1_Postal_Code": _pick_localized(
+                            notice.get("place-of-performance-post-code-proc") or notice.get("buyer-post-code"),
+                            languages,
+                        ),
+                        "Address_1_City": _pick_localized(
+                            notice.get("place-of-performance-city-proc") or notice.get("buyer-city"),
+                            languages,
+                        ),
+                        "Address_1_State_Province": _pick_localized(
+                            notice.get("place-of-performance-subdiv-proc") or notice.get("buyer-country-sub"),
+                            languages,
+                        ),
+                        "Address_1_Country": country,
+                        "Address_1_Latitude": None,
+                        "Address_1_Longitude": None,
+                    }
+                )
+            )
+        )
+    return _dedupe_codes(leads)
+
+
+def _transform_ocds(payload, source: str, country: str, prefix: str, currency: str, notice_url) -> list[dict]:
+    releases = (payload or {}).get("releases") if isinstance(payload, dict) else None
+    if not isinstance(releases, list):
+        return []
+    leads = []
+    for release in releases:
+        if not isinstance(release, dict) or not _keep_ocds(release):
+            continue
+        amount, value_currency = _ocds_value(release)
+        address = _ocds_address(release)
+        leads.append(
+            _guard_new_code(
+                _finalize_lead(
+                    {
+                        "Project_Name": _ocds_title(release),
+                        "External_Project_Code": generate_external_code(prefix, release.get("id")),
+                        "Lead_Source_Name": source,
+                        "Country": country,
+                        "Construction_Project_Phase": _ocds_phase(release),
+                        "Total_Value": amount,
+                        "Currency": value_currency or currency,
+                        "Notes": _ocds_description(release),
+                        "Buyer_Name": _ocds_buyer(release),
+                        "Cpv_Codes": _join_cpv(_ordered_cpv(_ocds_cpv_codes(release))),
+                        "Notice_Type": _ocds_notice_type(release),
+                        "Published_On": release.get("date"),
+                        "Notice_Url": notice_url(release),
+                        "Tender_Closing_Date": _ocds_closing(release),
+                        "Tender_Award_Date": _ocds_award_date(release),
+                        "Construction_Start_Date": None,
+                        "Construction_End_Date": None,
+                        "Address_1_Postal_Code": address.get("postalCode"),
+                        "Address_1_City": address.get("locality"),
+                        "Address_1_State_Province": address.get("region"),
+                        "Address_1_Country": country,
+                        "Address_1_Latitude": address.get("latitude", address.get("lat")),
+                        "Address_1_Longitude": address.get("longitude", address.get("lon", address.get("long"))),
+                    }
+                )
+            )
+        )
+    return _dedupe_codes(leads)
+
+
+def _keep_ocds(release: dict) -> bool:
+    """Keep works and unclassified notices in CPV 45, plus concrete supplies.
+
+    Supplies and services are dropped even when they also cite a works code.
+    Concrete (CPV 44114) is the supplies exception, matching the TED query.
+    """
+    codes = _ocds_cpv_codes(release)
+    if not any(_is_construction_cpv(code) for code in codes):
+        return False
+    category = sanitize_text(
+        (release.get("tender") or {}).get("mainProcurementCategory"),
+        40,
+    ).lower()
+    concrete = any(_cpv_digits(code).startswith("44114") for code in codes)
+    if category in SERVICE_CATEGORIES:
+        return False
+    if category in SUPPLY_CATEGORIES:
+        return concrete
+    return True
+
+
+def _keep_tenderned(row: dict) -> bool:
+    kind = _tenderned_kind(row)
+    codes = _tenderned_cpv_codes(row)
+    concrete = any(_cpv_digits(code).startswith("44114") for code in codes)
+    works = any(_cpv_digits(code).startswith("45") for code in codes)
+    if kind == "D":
+        return False
+    if kind == "L":
+        return concrete or bool(row.get("_matchedConcrete") and not codes)
+    if codes:
+        return works or concrete
+    return kind == "W" or bool(row.get("_matchedConcrete"))
+
+
+def _tenderned_kind(row: dict) -> str:
+    for key in ("typeOpdrachtCode", "typeOpdracht"):
+        value = row.get(key)
+        if isinstance(value, dict) and value.get("code"):
+            return sanitize_text(value.get("code"), 4).upper()
+    return ""
+
+
+def _tenderned_cpv_codes(row: dict) -> list[str]:
+    codes = []
+    items = row.get("cpvCodes") or []
+    if not isinstance(items, list):
+        return codes
+    ordered = sorted(
+        (item for item in items if isinstance(item, dict)),
+        key=lambda item: not bool(item.get("isHoofdOpdracht")),
+    )
+    for item in ordered:
+        code = _normalize_cpv(item.get("code"))
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _tenderned_region(row: dict) -> str:
+    names = []
+    for nuts in row.get("nutsCodes") or []:
+        if not isinstance(nuts, dict):
+            continue
+        name = sanitize_text(nuts.get("omschrijving") or nuts.get("code"), 80)
+        if name and name not in names:
+            names.append(name)
+    return ", ".join(names)
+
+
+def _tenderned_phase(row: dict) -> int:
+    form = sanitize_text(row.get("formType"), 40).lower()
+    if form == "result" or row.get("isGegund") is True:
+        return map_phase_to_optionset("awarded")
+    code = ""
+    label = ""
+    list_type = row.get("typePublicatie")
+    if isinstance(list_type, dict):
+        code = sanitize_text(list_type.get("code"), 12).upper()
+        label = sanitize_text(list_type.get("omschrijving"), 120).lower()
+    detail_type = row.get("aankondigingCode")
+    if isinstance(detail_type, dict) and detail_type.get("code"):
+        code = sanitize_text(detail_type.get("code"), 12).upper() or code
+    if code in {"AGO", "GUN"} or "gegund" in label:
+        return map_phase_to_optionset("awarded")
+    if code in {"VOA", "PIN"} or "vooraankondiging" in label or form == "planning":
+        return map_phase_to_optionset("planning")
+    return map_phase_to_optionset("tender")
+
+
+def _market_value(notice: dict, default_currency: str) -> tuple[float | None, str]:
+    value, _currency = _ted_value(notice)
+    raw = sanitize_text(
+        _first(notice.get("estimated-value-cur-proc") or notice.get("estimated-value-cur-lot")),
+        10,
+    ).upper()
+    return value, raw or default_currency
+
+
+def _market_title(notice: dict, languages: tuple[str, ...]) -> str:
+    text = _pick_localized(notice.get("notice-title"), languages)
+    parts = [part.strip() for part in re.split(r"\s+[–—]\s+", text) if part.strip()]
+    if len(parts) >= 2:
+        text = parts[-1]
+    return sanitize_text(text, 162)
+
+
+def _pick_localized(value, languages: tuple[str, ...]) -> str:
+    if isinstance(value, dict):
+        for lang in languages:
+            picked = value.get(lang)
+            if picked:
+                return sanitize_text(_first(picked), 500)
+        return _localized(value)
+    return _localized(value)
+
+
+def _cpv_from_ted(notice: dict) -> list[str]:
+    codes = []
+    for raw in _as_list(notice.get("classification-cpv")):
+        code = _normalize_cpv(raw)
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _ocds_title(release: dict) -> str:
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    title = tender.get("title")
+    if not title:
+        for award in _as_list(release.get("awards")):
+            if isinstance(award, dict) and award.get("title"):
+                title = award.get("title")
+                break
+    return sanitize_text(title, 500)
+
+
+def _ocds_description(release: dict) -> str:
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    return tender.get("description") or release.get("description") or ""
+
+
+def _ocds_buyer(release: dict) -> str:
+    names = []
+    buyer = release.get("buyer") if isinstance(release.get("buyer"), dict) else {}
+    if buyer.get("name"):
+        names.append(str(buyer["name"]))
+    for party in _as_list(release.get("parties")):
+        if not isinstance(party, dict):
+            continue
+        roles = {str(role).lower() for role in _as_list(party.get("roles"))}
+        name = party.get("name")
+        if "buyer" in roles and name and name not in names:
+            names.append(str(name))
+    return ", ".join(names[:3])
+
+
+def _ocds_address(release: dict) -> dict:
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    for item in _as_list(tender.get("items")):
+        if not isinstance(item, dict):
+            continue
+        for address in _as_list(item.get("deliveryAddresses")):
+            if isinstance(address, dict) and _address_has_place(address):
+                return address
+    for party in _as_list(release.get("parties")):
+        if not isinstance(party, dict):
+            continue
+        roles = {str(role).lower() for role in _as_list(party.get("roles"))}
+        address = party.get("address")
+        if "buyer" in roles and isinstance(address, dict):
+            return address
+    return {}
+
+
+def _address_has_place(address: dict) -> bool:
+    return any(address.get(key) for key in ("locality", "postalCode", "region", "streetAddress"))
+
+
+def _ocds_value(release: dict) -> tuple[object, object]:
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    amount, currency = _amount_pair(tender.get("value"))
+    if amount is not None:
+        return amount, currency
+    for lot in _as_list(tender.get("lots")):
+        if isinstance(lot, dict):
+            amount, currency = _amount_pair(lot.get("value"))
+            if amount is not None:
+                return amount, currency
+    for award in _as_list(release.get("awards")):
+        if isinstance(award, dict):
+            amount, currency = _amount_pair(award.get("value"))
+            if amount is not None:
+                return amount, currency
+    return None, None
+
+
+def _amount_pair(value) -> tuple[object, object]:
+    if isinstance(value, dict) and value.get("amount") is not None:
+        return value.get("amount"), value.get("currency")
+    return None, None
+
+
+def _ocds_closing(release: dict):
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    end = (tender.get("tenderPeriod") or {}).get("endDate") if isinstance(tender.get("tenderPeriod"), dict) else None
+    if end:
+        return end
+    for lot in _as_list(tender.get("lots")):
+        if not isinstance(lot, dict) or not isinstance(lot.get("tenderPeriod"), dict):
+            continue
+        if lot["tenderPeriod"].get("endDate"):
+            return lot["tenderPeriod"]["endDate"]
+    return None
+
+
+def _ocds_award_date(release: dict):
+    """Award decision date, or the published signature date when that is the only one."""
+    for award in _as_list(release.get("awards")):
+        if isinstance(award, dict) and award.get("date"):
+            return award.get("date")
+    for contract in _as_list(release.get("contracts")):
+        if isinstance(contract, dict) and contract.get("dateSigned"):
+            return contract.get("dateSigned")
+    return None
+
+
+def _ocds_phase(release: dict) -> int:
+    tags = {str(tag).lower() for tag in _as_list(release.get("tag"))}
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    status = sanitize_text(tender.get("status"), 40).lower()
+    if status in {"cancelled", "canceled", "withdrawn", "unsuccessful"}:
+        return map_phase_to_optionset("cancelled")
+    if tags & {"award", "contract"} or status in {"complete", "awarded"}:
+        return map_phase_to_optionset("awarded")
+    if "tender" in tags or status == "active":
+        return map_phase_to_optionset("tender")
+    if "planning" in tags:
+        return map_phase_to_optionset("planning")
+    return map_phase_to_optionset(status or "planning")
+
+
+def _ocds_notice_type(release: dict) -> str:
+    found = _find_notice_type(release, 0)
+    if found:
+        return sanitize_text(found, 80)
+    tags = [str(tag) for tag in _as_list(release.get("tag")) if tag]
+    return sanitize_text(", ".join(tags), 80)
+
+
+def _find_notice_type(node, depth: int):
+    if depth > 5:
+        return None
+    if isinstance(node, dict):
+        if node.get("noticeType"):
+            return node.get("noticeType")
+        for value in node.values():
+            found = _find_notice_type(value, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_notice_type(item, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _ocds_cpv_codes(release: dict) -> list[str]:
+    codes = []
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    _collect_cpv(tender.get("classification"), codes)
+    _collect_cpv(tender.get("additionalClassifications"), codes)
+    for item in _as_list(tender.get("items")):
+        if not isinstance(item, dict):
+            continue
+        _collect_cpv(item.get("classification"), codes)
+        _collect_cpv(item.get("additionalClassifications"), codes)
+    for bucket_name in ("awards", "contracts"):
+        for bucket in _as_list(release.get(bucket_name)):
+            if not isinstance(bucket, dict):
+                continue
+            for item in _as_list(bucket.get("items")):
+                if not isinstance(item, dict):
+                    continue
+                _collect_cpv(item.get("classification"), codes)
+                _collect_cpv(item.get("additionalClassifications"), codes)
+    return codes
+
+
+def _collect_cpv(node, codes: list[str]) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _collect_cpv(item, codes)
+        return
+    if not isinstance(node, dict):
+        return
+    scheme = sanitize_text(node.get("scheme"), 20).upper()
+    if scheme and "CPV" not in scheme:
+        return
+    code = _normalize_cpv(node.get("id"))
+    if code and code not in codes:
+        codes.append(code)
+
+
+def _find_a_tender_url(release: dict) -> str:
+    notice_id = str(release.get("id") or "")
+    if re.fullmatch(r"\d{6}-\d{4}", notice_id):
+        return f"https://www.find-tender.service.gov.uk/Notice/{notice_id}"
+    return ""
+
+
+def _contracts_finder_url(release: dict) -> str:
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    for document in _as_list(tender.get("documents")):
+        if not isinstance(document, dict):
+            continue
+        url = str(document.get("url") or "")
+        if "contractsfinder.service.gov.uk/Notice/" in url:
+            return url
+    return ""
+
+
+def _is_construction_cpv(code: str) -> bool:
+    digits = _cpv_digits(code)
+    return digits.startswith("45") or digits.startswith("44114")
+
+
+def _cpv_digits(code: str) -> str:
+    match = re.match(r"(\d{8})", code or "")
+    return match.group(1) if match else ""
+
+
+def _normalize_cpv(raw) -> str:
+    text = sanitize_text(raw, 20)
+    match = re.search(r"(\d{8})(?:-(\d))?", text)
+    if not match:
+        return ""
+    if match.group(2):
+        return f"{match.group(1)}-{match.group(2)}"
+    return match.group(1)
+
+
+def _ordered_cpv(codes: list[str]) -> list[str]:
+    def rank(code: str) -> tuple[int, str]:
+        return (0 if _is_construction_cpv(code) else 1, code)
+
+    ordered = []
+    for code in sorted(codes, key=rank):
+        if code not in ordered:
+            ordered.append(code)
+    return ordered
+
+
+def _join_cpv(codes: list[str]) -> str:
+    kept: list[str] = []
+    for code in codes:
+        candidate = ", ".join(kept + [code])
+        if len(candidate) > FIELD_LIMITS["Cpv_Codes"]:
+            break
+        kept.append(code)
+    return ", ".join(kept)
+
+
+def _guard_new_code(lead: dict) -> dict:
+    code = lead.get("External_Project_Code") or ""
+    if code.startswith(SWEDISH_CODE_PREFIXES):
+        raise RuntimeError("Refusing a Swedish external-code prefix on a non-Swedish lead.")
+    return lead

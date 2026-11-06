@@ -11,7 +11,13 @@ import pandas as pd
 import streamlit as st
 
 from database import engine, init_db
-from main import run_etl_pipeline
+from main import (
+    COUNTRY_ORDER,
+    FETCH_SPINNERS,
+    SOURCE_LABELS,
+    run_etl_pipeline,
+    run_scheduled_pipelines,
+)
 from schedule import next_slot, scheduled_run_is_due
 from transformer import PHASE_LABELS
 
@@ -64,13 +70,29 @@ ALWAYS_VISIBLE = {
     "External_Project_Code",
     "Notes",
 }
-SHARED_BY_SOURCE = {
-    "Buyer_Name": {"EU_TED", "OpenTender"},
-    "Cpv_Codes": {"EU_TED", "OpenTender"},
-    "Tender_Closing_Date": {"EU_TED", "OpenTender"},
-    "Tender_Award_Date": {"EU_TED", "OpenTender"},
-    "Notice_Url": {"EU_TED", "OpenTender"},
+TENDER_SOURCES = {
+    "EU_TED",
+    "OpenTender",
+    "UK_Find_a_Tender",
+    "UK_Contracts_Finder",
+    "BE_TED",
+    "NL_TED",
+    "NL_TenderNed",
 }
+SHARED_BY_SOURCE = {
+    "Buyer_Name": set(TENDER_SOURCES),
+    "Cpv_Codes": set(TENDER_SOURCES),
+    "Tender_Closing_Date": set(TENDER_SOURCES),
+    "Tender_Award_Date": set(TENDER_SOURCES),
+    "Notice_Url": set(TENDER_SOURCES),
+}
+SWEDISH_SOURCES = {"Trafikverket", "EU_TED", "OpenTender"}
+OBSERVED_COLUMNS = (
+    "Construction_Start_Date",
+    "Construction_End_Date",
+    "Address_1_Latitude",
+    "Address_1_Longitude",
+)
 EXCLUSIVE_TO_SOURCE = {
     "Construction_Start_Date": "Trafikverket",
     "Construction_End_Date": "Trafikverket",
@@ -102,27 +124,30 @@ DATE_OPERATORS = ["On", "Before", "After", "Is empty"]
 def main() -> None:
     init_db()
     _inject_brand_css()
-    _render_header()
+    country = _render_header()
     _run_scheduled_refresh()
 
-    if st.button("Fetch latest data", type="primary"):
-        summary = _refresh("Fetching Trafikverket, TED, and OpenTender…")
+    if st.button(f"Fetch latest data · {country}", type="primary"):
+        summary = _refresh(FETCH_SPINNERS[country], country)
         st.session_state["last_run"] = summary
         load_leads.clear()
 
-    last_run = st.session_state.get("last_run")
+    last_run = _summary_for_country(st.session_state.get("last_run"), country)
     if last_run:
-        _render_run_summary(last_run)
+        _render_run_summary(last_run, country)
 
-    frame = load_leads()
+    frame = _country_frame(load_leads(), country)
     if frame.empty:
-        st.info("The staging database is empty. Use Fetch Latest Data to load public notices.")
+        st.info(
+            f"No {country} leads are in the staging database. "
+            f"Use Fetch latest data · {country} to load public notices."
+        )
         return
 
     prepared = _prepare(frame)
-    _render_kpis(prepared)
-    filtered, selected_sources = _render_filters(prepared)
-    _render_table(filtered, selected_sources)
+    _render_kpis(prepared, country)
+    filtered, selected_sources = _render_filters(prepared, country)
+    _render_table(filtered, selected_sources, prepared)
 
 
 def _inject_brand_css() -> None:
@@ -225,21 +250,31 @@ def _inject_brand_css() -> None:
     )
 
 
-def _render_header() -> None:
+def _render_header() -> str:
     upcoming = next_slot().strftime("%d %b %Y, %H:%M")
     st.markdown(
-        f"""
+        """
         <div class="appbar">
           <p class="appbar-name">MR Project</p>
           <p class="appbar-test">TEST</p>
         </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if "country" not in st.session_state:
+        st.session_state["country"] = "Sweden"
+    picker, _rest = st.columns([1.15, 3.2])
+    country = picker.selectbox("Country", list(COUNTRY_ORDER), key="country")
+    st.markdown(
+        f"""
         <div class="workspace">
           <p class="view-title">Leads</p>
-          <p class="view-sub">Real public notices. This is a test desk, not sample data. Next refresh {upcoming} Swedish time.</p>
+          <p class="view-sub">{country}. Real public notices. This is a test desk, not sample data. Next refresh {upcoming} Swedish time.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    return country
 
 
 def _run_scheduled_refresh() -> None:
@@ -253,36 +288,67 @@ def _run_scheduled_refresh() -> None:
     load_leads.clear()
 
 
-def _refresh(label: str) -> dict:
+def _refresh(label: str, country: str | None = None) -> dict:
     try:
         with st.spinner(label):
-            return run_etl_pipeline()
+            if country is None:
+                return run_scheduled_pipelines()
+            return run_etl_pipeline(country)
     except Exception as exc:
-        return {
+        failed = {
+            "country": country or "*",
             "fetched": {},
             "upserted": {},
             "errors": [f"Refresh stopped: {exc.__class__.__name__}"],
+            "notes": [],
             "total_upserted": 0,
         }
+        if country is None:
+            failed["by_country"] = {
+                name: {**failed, "country": name, "errors": list(failed["errors"])}
+                for name in COUNTRY_ORDER
+            }
+        return failed
 
 
-def _render_run_summary(summary: dict) -> None:
+def _summary_for_country(summary: dict | None, country: str) -> dict | None:
+    """Show this country's slice of a run. A UK fetch must not sit on the Sweden view."""
+    if not summary:
+        return None
+    if summary.get("country") == "*":
+        return (summary.get("by_country") or {}).get(country)
+    run_country = summary.get("country")
+    if run_country in {None, country}:
+        if run_country is None and country != "Sweden":
+            return None
+        return summary
+    return None
+
+
+def _render_run_summary(summary: dict, country: str) -> None:
     counts = ", ".join(
         f"{source} {count}" for source, count in summary.get("upserted", {}).items()
     )
-    st.success(f"Last refresh upserted {summary.get('total_upserted', 0)} leads ({counts}).")
+    total = summary.get("total_upserted", 0)
+    if country == "Sweden":
+        st.success(f"Last refresh upserted {total} leads ({counts}).")
+    else:
+        st.success(f"{country} refresh upserted {total} leads ({counts}).")
+    for note in summary.get("notes") or []:
+        st.warning(note)
     for error in summary.get("errors") or []:
         st.warning(error)
 
 
-def _render_kpis(frame: pd.DataFrame) -> None:
-    columns = st.columns(5)
+def _render_kpis(frame: pd.DataFrame, country: str) -> None:
+    labels = SOURCE_LABELS[country]
+    columns = st.columns(2 + len(labels))
     columns[0].metric("Leads", f"{len(frame):,}")
-    columns[1].metric("Trafikverket", f"{(frame['Lead_Source_Name'] == 'Trafikverket').sum():,}")
-    columns[2].metric("EU TED", f"{(frame['Lead_Source_Name'] == 'EU_TED').sum():,}")
-    columns[3].metric("OpenTender", f"{(frame['Lead_Source_Name'] == 'OpenTender').sum():,}")
+    for index, (source, label) in enumerate(labels, start=1):
+        count = int((frame["Lead_Source_Name"] == source).sum())
+        columns[index].metric(label, f"{count:,}")
     tendering = (frame["Construction_Project_Phase"] == 948050001).sum()
-    columns[4].metric("Open tenders", f"{int(tendering):,}")
+    columns[-1].metric("Open tenders", f"{int(tendering):,}")
 
     value_bits = []
     for currency, group in frame.dropna(subset=["Total_Value"]).groupby("Currency"):
@@ -290,20 +356,23 @@ def _render_kpis(frame: pd.DataFrame) -> None:
     st.caption("Pipeline value by source currency: " + (" · ".join(value_bits) if value_bits else "no values published"))
 
 
-def _render_filters(frame: pd.DataFrame):
+def _render_filters(frame: pd.DataFrame, country: str):
     sources = sorted(frame["Lead_Source_Name"].dropna().unique().tolist())
     present_phases = [
         phase for phase in PHASE_ORDER if phase in set(frame["Construction_Project_Phase"].dropna())
     ]
     left, middle, right = st.columns([1.2, 1.4, 1.6])
-    selected_sources = left.multiselect("Source", sources, default=sources)
+    selected_sources = left.multiselect(
+        "Source", sources, default=sources, key=f"sources_{country}"
+    )
     selected_phases = middle.multiselect(
         "Phase",
         present_phases,
         default=present_phases,
         format_func=lambda phase: f"{PHASE_LABELS.get(int(phase), 'Unknown')} ({int(phase)})",
+        key=f"phases_{country}",
     )
-    query = right.text_input("Quick find")
+    query = right.text_input("Quick find", key=f"find_{country}")
 
     filtered = frame[
         frame["Lead_Source_Name"].isin(selected_sources)
@@ -326,15 +395,21 @@ def _render_filters(frame: pd.DataFrame):
     count_col.caption(f"{len(filtered):,} of {len(frame):,} leads match the filters.")
     export_col.download_button(
         "Export to Excel",
-        data=_excel_bytes(filtered, selected_sources),
-        file_name="mr-project-leads.xlsx",
+        data=_excel_bytes(filtered, selected_sources, frame),
+        file_name=_export_name(country),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
+        key=f"export_{country}",
     )
     return filtered, selected_sources
 
 
-def _excel_bytes(frame: pd.DataFrame, selected_sources: list[str]) -> bytes:
+def _export_name(country: str) -> str:
+    slug = country.lower().replace(" ", "-")
+    return f"mr-project-leads-{slug}.xlsx"
+
+
+def _excel_bytes(frame: pd.DataFrame, selected_sources: list[str], catalog: pd.DataFrame) -> bytes:
     """Workbook of the rows and columns currently shown in the lead view."""
     display = frame.copy()
     if "Construction_Project_Phase" in display.columns:
@@ -345,7 +420,11 @@ def _excel_bytes(frame: pd.DataFrame, selected_sources: list[str]) -> bytes:
                 lambda phase: PHASE_LABELS.get(int(phase), "") if pd.notna(phase) else ""
             ),
         )
-    columns = [column for column in _visible_columns(selected_sources) if column in display.columns]
+    columns = [
+        column
+        for column in _visible_columns(selected_sources, catalog)
+        if column in display.columns
+    ]
     export = display[columns].copy()
     for column in export.columns:
         if pd.api.types.is_datetime64_any_dtype(export[column]):
@@ -457,7 +536,7 @@ def _apply_view_filters(frame: pd.DataFrame, conditions: list[dict]) -> pd.DataF
     return result
 
 
-def _visible_columns(selected_sources: list[str]) -> list[str]:
+def _visible_columns(selected_sources: list[str], catalog: pd.DataFrame | None = None) -> list[str]:
     chosen = set(selected_sources)
     visible = set(ALWAYS_VISIBLE)
     for column, owners in SHARED_BY_SOURCE.items():
@@ -468,10 +547,33 @@ def _visible_columns(selected_sources: list[str]) -> list[str]:
         for column, owner in EXCLUSIVE_TO_SOURCE.items():
             if owner == only:
                 visible.add(column)
+    if catalog is not None and not (chosen & SWEDISH_SOURCES):
+        _add_observed_columns(visible, chosen, catalog)
     return [column for column in COLUMN_ORDER if column in visible]
 
 
-def _render_table(frame: pd.DataFrame, selected_sources: list[str]) -> None:
+def _add_observed_columns(visible: set[str], chosen: set[str], catalog: pd.DataFrame) -> None:
+    """Show a date or coordinate column when the public rows actually contain it.
+
+    One owning source keeps the column hidden until that source is the only
+    selection. Sweden does not use this path.
+    """
+    if "Lead_Source_Name" not in catalog.columns:
+        return
+    for column in OBSERVED_COLUMNS:
+        if column not in catalog.columns:
+            continue
+        owners = set()
+        for source, group in catalog.groupby("Lead_Source_Name"):
+            if group[column].notna().any():
+                owners.add(source)
+        if len(owners) == 1 and chosen == owners:
+            visible.add(column)
+        elif len(owners) > 1 and chosen & owners:
+            visible.add(column)
+
+
+def _render_table(frame: pd.DataFrame, selected_sources: list[str], catalog: pd.DataFrame) -> None:
     display = frame.copy()
     display.insert(
         3,
@@ -480,7 +582,11 @@ def _render_table(frame: pd.DataFrame, selected_sources: list[str]) -> None:
             lambda phase: PHASE_LABELS.get(int(phase), "Unknown") if pd.notna(phase) else ""
         ),
     )
-    columns = [column for column in _visible_columns(selected_sources) if column in display.columns]
+    columns = [
+        column
+        for column in _visible_columns(selected_sources, catalog)
+        if column in display.columns
+    ]
     shown = display[columns]
     event = st.dataframe(
         shown,
@@ -520,6 +626,12 @@ def _render_table(frame: pd.DataFrame, selected_sources: list[str]) -> None:
 def load_leads() -> pd.DataFrame:
     init_db()
     return pd.read_sql_query("SELECT * FROM leads ORDER BY Project_Name", engine)
+
+
+def _country_frame(frame: pd.DataFrame, country: str) -> pd.DataFrame:
+    if frame.empty or "Country" not in frame.columns:
+        return frame.iloc[0:0]
+    return frame.loc[frame["Country"] == country].copy()
 
 
 def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
