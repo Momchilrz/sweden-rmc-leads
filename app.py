@@ -13,7 +13,7 @@ from main import run_etl_pipeline
 from schedule import next_slot, scheduled_run_is_due
 from transformer import PHASE_LABELS
 
-BRAND = "#1F3A5F"
+BRAND = "#004E2B"
 
 st.set_page_config(
     page_title="MR Project",
@@ -107,58 +107,95 @@ def _inject_brand_css() -> None:
     st.markdown(
         f"""
         <style>
+          html, body, [class*="css"] {{
+            font-family: "Segoe UI", "Segoe UI Web", sans-serif;
+          }}
           .stApp {{
-            background: #F4F6F4;
+            background: #FAF9F8;
           }}
-          .block-container {{
-            padding-top: 1.1rem;
-            max-width: 1280px;
-          }}
-          h1, h2, h3 {{
-            color: {BRAND};
-            font-weight: 700;
-            letter-spacing: -0.02em;
-          }}
-          div[data-testid="stMetric"] {{
-            background: #FFFFFF;
-            border-top: 4px solid {BRAND};
-            padding: 0.55rem 0.85rem 0.35rem;
-          }}
-          div[data-testid="stMetricLabel"] p {{
-            color: {BRAND};
-          }}
-          .mast {{
-            padding: 0.25rem 0 1.25rem;
-          }}
-          .kicker {{
-            margin: 0;
-            color: {BRAND};
-            font-size: 0.82rem;
-            font-weight: 650;
-            letter-spacing: 0.14em;
-            text-transform: uppercase;
-            line-height: 1.4;
-          }}
-          .mast a {{
+          [data-testid="stHeader"], [data-testid="stToolbar"] {{
             display: none;
           }}
-          .mast h1 {{
-            margin: 0.7rem 0 0.35rem;
-            font-size: 2rem;
-            line-height: 1.15;
-            font-weight: 650;
+          .block-container {{
+            padding-top: 0 !important;
+            padding-left: 1.25rem;
+            padding-right: 1.25rem;
+            max-width: 100%;
           }}
-          .lede {{
+          h1, h2, h3 {{
+            color: #323130;
+            font-weight: 600;
+            letter-spacing: 0;
+          }}
+          .appbar {{
+            background: {BRAND};
+            color: #ffffff;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 0 -1.25rem 8px;
+            padding: 0 16px;
+          }}
+          .appbar-name {{
             margin: 0;
-            max-width: 40rem;
-            color: #2C2C2C;
-            font-size: 0.98rem;
-            line-height: 1.45;
+            font-size: 16px;
+            font-weight: 600;
+            color: #ffffff;
           }}
-          .meta {{
-            margin: 0.35rem 0 0;
-            color: #6B6B6B;
-            font-size: 0.86rem;
+          .appbar-test {{
+            margin: 0;
+            border: 1px solid rgba(255,255,255,0.7);
+            border-radius: 2px;
+            padding: 2px 8px;
+            font-size: 12px;
+            letter-spacing: 0.04em;
+            color: #ffffff;
+          }}
+          .workspace {{
+            padding: 4px 0 0;
+          }}
+          .view-title {{
+            margin: 8px 0 0;
+            font-size: 20px;
+            font-weight: 600;
+            color: #323130;
+          }}
+          .view-sub {{
+            margin: 2px 0 8px;
+            color: #605E5C;
+            font-size: 12px;
+          }}
+          div[data-testid="stMetric"] {{
+            background: #ffffff;
+            border: 1px solid #EDEBE9;
+            border-top: 3px solid {BRAND};
+            padding: 8px 12px 4px;
+          }}
+          div[data-testid="stMetricLabel"] p {{
+            color: #605E5C;
+            font-size: 12px;
+          }}
+          div[data-testid="stMetricValue"] {{
+            color: #323130;
+            font-size: 20px;
+          }}
+          .stButton > button {{
+            background: {BRAND};
+            color: #ffffff;
+            border: 1px solid {BRAND};
+            border-radius: 2px;
+            height: 32px;
+            font-weight: 600;
+          }}
+          .stButton > button:hover {{
+            background: #00381F;
+            color: #ffffff;
+            border-color: #00381F;
+          }}
+          div[data-testid="stDataFrame"] {{
+            background: #ffffff;
+            border: 1px solid #EDEBE9;
           }}
         </style>
         """,
@@ -170,12 +207,14 @@ def _render_header() -> None:
     upcoming = next_slot().strftime("%d %b %Y, %H:%M")
     st.markdown(
         f"""
-        <header class="mast">
-          <p class="kicker">MR Project · Test</p>
-          <h1>Sweden RMC lead staging</h1>
-          <p class="lede">Real public notices from Sweden, kept here so they can be checked before any CRM load. This is a test desk. The rows are not sample data.</p>
-          <p class="meta">Refreshes daily at 06:00 Swedish time. Next slot: {upcoming}.</p>
-        </header>
+        <div class="appbar">
+          <p class="appbar-name">MR Project</p>
+          <p class="appbar-test">TEST</p>
+        </div>
+        <div class="workspace">
+          <p class="view-title">Leads</p>
+          <p class="view-sub">Real public notices. This is a test desk, not sample data. Next refresh {upcoming} Swedish time.</p>
+        </div>
         """,
         unsafe_allow_html=True,
     )
